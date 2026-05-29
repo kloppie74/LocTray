@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyDescriptionAttribute("Live PC performance in the system tray")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+88bdb99ae0e5100d34e6832cd9de5438e748c8d3")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+4c7e8e7d5721ce7103c64e5e8bf8744f7c5a7748")]
 [assembly: System.Reflection.AssemblyProductAttribute("LocTray")]
 [assembly: System.Reflection.AssemblyTitleAttribute("LocTray")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

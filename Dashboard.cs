@@ -87,10 +87,11 @@ namespace LocTray
             // Paint the text overlay; it returns how wide the text is in pixels.
             int width = _overlay.UpdateSegments(segs);
 
-            // Reserve that width with enough empty tray icons (over-estimate is
-            // harmless — extra slots are fully transparent).
-            int slot  = Math.Max(16, (int)(22 * _overlay.DeviceDpi / 96.0));
-            int count = Math.Clamp((int)Math.Ceiling((double)width / slot), 1, 24);
+            // Reserve that width with empty tray icons. A promoted Win11 tray slot
+            // is ~38px wide (DPI-scaled); match the reserved width to the text so
+            // there are no leftover blank slots.
+            int slot  = Math.Max(28, (int)(38 * _overlay.DeviceDpi / 96.0));
+            int count = Math.Clamp((int)Math.Round((double)width / slot), 1, 16);
             EnsureIcons(count);
 
             if (_promoteTicks > 0) { _promoteTicks--; PromoteOutOfOverflow(); }
@@ -243,6 +244,11 @@ namespace LocTray
         private readonly Font _fLabel = new("Segoe UI", 9f, FontStyle.Regular);
         private readonly Font _fValue = new("Segoe UI Semibold", 9f, FontStyle.Bold);
         private List<Seg> _segs = new();
+        private int _width;
+
+        // Horizontal nudge: promoted icons sit just right of the "^" chevron,
+        // so start the text a little right of the notification area's left edge.
+        const int X_OFFSET = 4;
 
         public StatOverlay()
         {
@@ -273,16 +279,18 @@ namespace LocTray
         protected override void WndProc(ref Message m)
         {
             base.WndProc(ref m);
-            if (m.Msg == WM_SETTINGCHANGE || m.Msg == WM_DISPLAYCHANGE) Reposition();
+            if (m.Msg == WM_SETTINGCHANGE || m.Msg == WM_DISPLAYCHANGE) ApplyPos();
         }
 
-        // Returns the rendered text width in pixels.
+        // Measure the rendered text width in pixels (used to size the icon row),
+        // then dock the overlay over the notification area.
         public int UpdateSegments(List<Seg> segs)
         {
             _segs = segs;
-            Reposition();
+            using (var g = CreateGraphics()) _width = MeasureWidth(g);
+            ApplyPos();
             Invalidate();
-            return Width;
+            return _width;
         }
 
         private int MeasureWidth(Graphics g)
@@ -297,28 +305,27 @@ namespace LocTray
             return (int)Math.Ceiling(w) + PAD_X;
         }
 
-        private void Reposition()
+        // Dock over the left edge of the notification area (where our promoted
+        // icons sit), extending right, vertically centred on the taskbar.
+        private void ApplyPos()
         {
-            if (!IsHandleCreated || _segs.Count == 0) return;
+            if (!IsHandleCreated || _width <= 0) return;
 
             IntPtr tray = FindWindow("Shell_TrayWnd", null);
             if (tray == IntPtr.Zero || !GetWindowRect(tray, out var tb)) return;
 
-            int barH = tb.Bottom - tb.Top;
-            int rightEdge = tb.Right;
+            int leftEdge = tb.Right;
             IntPtr notify = FindWindowEx(tray, IntPtr.Zero, "TrayNotifyWnd", null);
             if (notify != IntPtr.Zero && GetWindowRect(notify, out var nb))
-                rightEdge = nb.Left;
+                leftEdge = nb.Left;
 
-            int w;
-            using (var g = CreateGraphics()) w = MeasureWidth(g);
-
+            int barH = tb.Bottom - tb.Top;
             int h = Math.Min(barH, 40);
-            int x = rightEdge - w - 4;
+            int x = leftEdge + X_OFFSET;
             int y = tb.Top + (barH - h) / 2;
 
-            if (Size.Width != w || Size.Height != h) Size = new Size(w, h);
-            SetWindowPos(Handle, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            if (Size.Width != _width || Size.Height != h) Size = new Size(_width, h);
+            SetWindowPos(Handle, HWND_TOPMOST, x, y, _width, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
 
         protected override void OnPaint(PaintEventArgs e)
