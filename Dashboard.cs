@@ -91,7 +91,7 @@ namespace LocTray
             // is ~38px wide (DPI-scaled); match the reserved width to the text so
             // there are no leftover blank slots.
             int slot  = Math.Max(28, (int)(38 * _overlay.DeviceDpi / 96.0));
-            int count = Math.Clamp((int)Math.Round((double)width / slot), 1, 16);
+            int count = Math.Clamp((int)Math.Round((double)width / slot) + 1, 1, 16);
             EnsureIcons(count);
 
             if (_promoteTicks > 0) { _promoteTicks--; PromoteOutOfOverflow(); }
@@ -248,7 +248,7 @@ namespace LocTray
 
         // Horizontal nudge: promoted icons sit just right of the "^" chevron,
         // so start the text a little right of the notification area's left edge.
-        const int X_OFFSET = 4;
+        const int X_OFFSET = 28;
 
         public StatOverlay()
         {
@@ -293,13 +293,23 @@ namespace LocTray
             return _width;
         }
 
+        // Reserve a fixed column width per value so the layout never shifts when
+        // a number grows/shrinks (e.g. "9%" → "29%").
+        private float ValueWidth(Graphics g, Seg s)
+        {
+            string tmpl = s.Value.EndsWith("%")  ? "100%"
+                        : s.Value.EndsWith("ms") ? "999ms"
+                        : s.Value;
+            return g.MeasureString(tmpl, _fValue).Width;
+        }
+
         private int MeasureWidth(Graphics g)
         {
             float w = PAD_X;
             for (int i = 0; i < _segs.Count; i++)
             {
                 w += g.MeasureString(_segs[i].Label, _fLabel).Width + 4f;
-                w += g.MeasureString(_segs[i].Value, _fValue).Width;
+                w += ValueWidth(g, _segs[i]);
                 if (i < _segs.Count - 1) w += GAP;
             }
             return (int)Math.Ceiling(w) + PAD_X;
@@ -348,7 +358,7 @@ namespace LocTray
                 using var vBr = new SolidBrush(s.Color);
                 var vSz = g.MeasureString(s.Value, _fValue);
                 g.DrawString(s.Value, _fValue, vBr, x, midY - vSz.Height / 2f);
-                x += vSz.Width + GAP;
+                x += ValueWidth(g, s) + GAP;   // fixed column, left-aligned
             }
         }
 
