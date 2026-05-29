@@ -10,9 +10,20 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <InformationalVersion>1.0.0</InformationalVersion>
     <Company>LocTray</Company>
     <Product>LocTray</Product>
-    <Description>Live PC performance in the system tray</Description>
+    <Authors>LocTray</Authors>
+    <Description>LocTray — live PC performance stats shown next to the system clock.</Description>
+    <Copyright>Copyright © LocTray 2026</Copyright>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <DebugType>embedded</DebugType>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
 
 </Project>

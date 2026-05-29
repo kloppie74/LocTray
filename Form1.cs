@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
-using System.Linq;
 using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
@@ -17,6 +15,10 @@ namespace LocTray
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetSystemTimes(out FILETIME idle, out FILETIME kernel, out FILETIME user);
+
         [StructLayout(LayoutKind.Sequential)]
         private struct MEMORYSTATUSEX
         {
@@ -26,37 +28,37 @@ namespace LocTray
                          ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FILETIME { public uint Low, High; public ulong V => ((ulong)High << 32) | Low; }
+
         private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string AppRegPath = @"Software\LocTray";
         private const string AppName    = "LocTray";
         private readonly ToolStripMenuItem _startupItem;
         private readonly TaskbarBar _bar;
         private readonly System.Windows.Forms.Timer _timer;
-        private readonly PerformanceCounter _cpuPc = new("Processor", "% Processor Time", "_Total");
-        private readonly PerformanceCounter _readPc;
-        private readonly PerformanceCounter _writePc;
         private readonly Ping _pinger = new();
 
-        private float _cpu, _ram, _read, _write;
-        private long _ping = -1;
-        private int _tickCount;
-        private bool _pingInFlight;
+        private float _cpu, _ram;
+        private long  _ping = -1;
+        private int   _tickCount;
+        private bool  _pingInFlight;
+        private ulong _prevIdle, _prevKernel, _prevUser;
+        private List<(string letter, double used, double total, int pct)> _drives = new();
 
         public Form1()
         {
-            // Hoofdvenster blijft onzichtbaar
-            ShowInTaskbar = false;
+            ShowInTaskbar   = false;
             FormBorderStyle = FormBorderStyle.None;
-            WindowState = FormWindowState.Minimized;
-            Opacity = 0;
+            WindowState     = FormWindowState.Minimized;
+            Opacity         = 0;
 
-            bool firstRun = InitAutostart();
+            InitAutostart();
 
-            // Contextmenu: zit op de TaskbarBar (rechtsklik)
             var menu = new ContextMenuStrip();
             _startupItem = new ToolStripMenuItem("Start met Windows")
             {
-                Checked = IsAutostartEnabled(),
+                Checked      = IsAutostartEnabled(),
                 CheckOnClick = true
             };
             _startupItem.CheckedChanged += (_, _) => SetAutostart(_startupItem.Checked);
@@ -66,32 +68,18 @@ namespace LocTray
 
             _bar = new TaskbarBar { ContextMenuStrip = menu };
 
-            // Disk counter: pak primaire schijf (index 0), fallback _Total
-            string instance = "_Total";
-            try
-            {
-                instance = new PerformanceCounterCategory("PhysicalDisk")
-                    .GetInstanceNames()
-                    .FirstOrDefault(n => n.StartsWith("0 ")) ?? "_Total";
-            }
-            catch { }
+            // Prime CPU sampler (first delta is zero anyway, but cache initial counters).
+            ReadCpu();
+            _drives = GatherDrives();
 
-            _readPc  = new PerformanceCounter("PhysicalDisk", "Disk Read Bytes/sec",  instance);
-            _writePc = new PerformanceCounter("PhysicalDisk", "Disk Write Bytes/sec", instance);
-
-            _cpuPc.NextValue();
-            _readPc.NextValue();
-            _writePc.NextValue();
-
-            _timer = new System.Windows.Forms.Timer { Interval = 1000 };
+            _timer = new System.Windows.Forms.Timer { Interval = 500 };
             _timer.Tick += (_, _) => Tick();
             _timer.Start();
             Tick();
 
             _bar.Show();
 
-            if (firstRun)
-                new WelcomePopup().Show();
+            new WelcomePopup().Show();
         }
 
         protected override void SetVisibleCore(bool value) => base.SetVisibleCore(false);
@@ -103,7 +91,7 @@ namespace LocTray
         }
 
         // ---- Autostart ----
-        private static bool InitAutostart()
+        private static void InitAutostart()
         {
             using var appKey = Registry.CurrentUser.CreateSubKey(AppRegPath);
             bool firstRun = appKey.GetValue("Initialized") == null;
@@ -116,7 +104,6 @@ namespace LocTray
             {
                 SetAutostart(true);
             }
-            return firstRun;
         }
 
         private static bool IsAutostartEnabled()
@@ -135,23 +122,43 @@ namespace LocTray
                 k.DeleteValue(AppName, throwOnMissingValue: false);
         }
 
-        // ---- Main tick (1s) ----
+        // ---- Main tick (50 ms) ----
         private void Tick()
         {
-            _cpu = _cpuPc.NextValue();
+            _tickCount++;
+
+            _cpu = ReadCpu();
+
             var m = new MEMORYSTATUSEX { dwLength = (uint)Marshal.SizeOf<MEMORYSTATUSEX>() };
             GlobalMemoryStatusEx(ref m);
             _ram = m.dwMemoryLoad;
-            _read  = _readPc.NextValue();
-            _write = _writePc.NextValue();
 
-            var drives = GatherDrives();
+            // Drives refresh every 2s.
+            if (_tickCount % 4 == 0) _drives = GatherDrives();
 
-            // Ping elke 5s
-            if (++_tickCount % 5 == 1 && !_pingInFlight)
-                _ = DoPingAsync();
+            // Ping every 5s.
+            if (_tickCount % 10 == 1 && !_pingInFlight) _ = DoPingAsync();
 
-            _bar.UpdateStats(_cpu, _ram, _read, _write, _ping, drives);
+            _bar.UpdateStats(_cpu, _ram, _ping, _drives);
+        }
+
+        // Smooth CPU% via GetSystemTimes deltas — works cleanly at any tick rate
+        // (unlike PerformanceCounter which gets jittery below ~250 ms intervals).
+        private float ReadCpu()
+        {
+            if (!GetSystemTimes(out var i, out var k, out var u)) return _cpu;
+            ulong iv = i.V, kv = k.V, uv = u.V;
+            if (_prevKernel == 0)
+            {
+                _prevIdle = iv; _prevKernel = kv; _prevUser = uv;
+                return 0f;
+            }
+            ulong total = (kv - _prevKernel) + (uv - _prevUser);
+            ulong idle  = iv - _prevIdle;
+            _prevIdle = iv; _prevKernel = kv; _prevUser = uv;
+            if (total == 0) return _cpu;
+            double pct = (1.0 - (double)idle / total) * 100.0;
+            return (float)Math.Clamp(pct, 0d, 100d);
         }
 
         private async Task DoPingAsync()
@@ -194,9 +201,6 @@ namespace LocTray
         {
             _timer.Stop();
             _bar?.Dispose();
-            _cpuPc.Dispose();
-            _readPc.Dispose();
-            _writePc.Dispose();
             _pinger.Dispose();
             base.OnFormClosed(e);
         }

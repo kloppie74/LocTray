@@ -2,7 +2,7 @@
 cd /d "%~dp0"
 
 echo ===========================================
-echo   LocTray - Building single-file EXE
+echo   LocTray - Building self-contained release
 echo ===========================================
 echo.
 
@@ -29,7 +29,10 @@ if errorlevel 1 (
     exit /b 1
 )
 
-dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:DebugType=embedded -p:PublishReadyToRun=false
+REM Multi-file self-contained build: LocTray.exe + losse .NET DLLs ernaast.
+REM Geen single-file + geen compression — die combinatie liet Ziggo Safe Online
+REM (en andere AV's met packer-heuristics) op de exe afgaan.
+dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -p:DebugType=embedded -p:PublishReadyToRun=false
 
 if errorlevel 1 (
     echo.

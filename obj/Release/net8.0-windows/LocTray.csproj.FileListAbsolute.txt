@@ -13,3 +13,20 @@ C:\Users\klopr\Documents\GitHub\LocTray\obj\Release\net8.0-windows\refint\LocTra
 C:\Users\klopr\Documents\GitHub\LocTray\obj\Release\net8.0-windows\LocTray.pdb
 C:\Users\klopr\Documents\GitHub\LocTray\obj\Release\net8.0-windows\LocTray.genruntimeconfig.cache
 C:\Users\klopr\Documents\GitHub\LocTray\obj\Release\net8.0-windows\ref\LocTray.dll
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\bin\Release\net8.0-windows\LocTray.exe
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\bin\Release\net8.0-windows\LocTray.deps.json
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\bin\Release\net8.0-windows\LocTray.runtimeconfig.json
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\bin\Release\net8.0-windows\LocTray.dll
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\obj\Release\net8.0-windows\LocTray.GeneratedMSBuildEditorConfig.editorconfig
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\obj\Release\net8.0-windows\LocTray.AssemblyInfoInputs.cache
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\obj\Release\net8.0-windows\LocTray.AssemblyInfo.cs
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\obj\Release\net8.0-windows\LocTray.csproj.CoreCompileInputs.cache
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\obj\Release\net8.0-windows\LocTray.sourcelink.json
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\obj\Release\net8.0-windows\LocTray.dll
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\obj\Release\net8.0-windows\refint\LocTray.dll
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\obj\Release\net8.0-windows\LocTray.genruntimeconfig.cache
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\obj\Release\net8.0-windows\ref\LocTray.dll
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\bin\Release\net8.0-windows\System.Management.dll
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\bin\Release\net8.0-windows\runtimes\win\lib\net8.0\System.Management.dll
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\obj\Release\net8.0-windows\LocTray.csproj.AssemblyReference.cache
+D:\Documenten Rowan Klop\Documents\GitHub\LocTray\obj\Release\net8.0-windows\LocTray.csproj.Up2Date
