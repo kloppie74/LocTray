@@ -29,7 +29,6 @@ namespace LocTray
         private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string AppRegPath = @"Software\LocTray";
         private const string AppName    = "LocTray";
-
         private readonly ToolStripMenuItem _startupItem;
         private readonly TaskbarBar _bar;
         private readonly System.Windows.Forms.Timer _timer;

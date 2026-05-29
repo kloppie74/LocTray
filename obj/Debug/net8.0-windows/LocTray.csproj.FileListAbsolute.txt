@@ -1,0 +1,15 @@
+C:\Users\klopr\Documents\GitHub\LocTray\bin\Debug\net8.0-windows\LocTray.exe
+C:\Users\klopr\Documents\GitHub\LocTray\bin\Debug\net8.0-windows\LocTray.deps.json
+C:\Users\klopr\Documents\GitHub\LocTray\bin\Debug\net8.0-windows\LocTray.runtimeconfig.json
+C:\Users\klopr\Documents\GitHub\LocTray\bin\Debug\net8.0-windows\LocTray.dll
+C:\Users\klopr\Documents\GitHub\LocTray\bin\Debug\net8.0-windows\LocTray.pdb
+C:\Users\klopr\Documents\GitHub\LocTray\obj\Debug\net8.0-windows\LocTray.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\klopr\Documents\GitHub\LocTray\obj\Debug\net8.0-windows\LocTray.AssemblyInfoInputs.cache
+C:\Users\klopr\Documents\GitHub\LocTray\obj\Debug\net8.0-windows\LocTray.AssemblyInfo.cs
+C:\Users\klopr\Documents\GitHub\LocTray\obj\Debug\net8.0-windows\LocTray.csproj.CoreCompileInputs.cache
+C:\Users\klopr\Documents\GitHub\LocTray\obj\Debug\net8.0-windows\LocTray.sourcelink.json
+C:\Users\klopr\Documents\GitHub\LocTray\obj\Debug\net8.0-windows\LocTray.dll
+C:\Users\klopr\Documents\GitHub\LocTray\obj\Debug\net8.0-windows\refint\LocTray.dll
+C:\Users\klopr\Documents\GitHub\LocTray\obj\Debug\net8.0-windows\LocTray.pdb
+C:\Users\klopr\Documents\GitHub\LocTray\obj\Debug\net8.0-windows\LocTray.genruntimeconfig.cache
+C:\Users\klopr\Documents\GitHub\LocTray\obj\Debug\net8.0-windows\ref\LocTray.dll

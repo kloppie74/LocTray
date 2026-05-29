@@ -1,20 +1,20 @@
 {
   "format": 1,
   "restore": {
-    "D:\\Documenten Rowan Klop\\Documents\\GitHub\\LocTray\\LocTray.csproj": {}
+    "C:\\Users\\klopr\\Documents\\GitHub\\LocTray\\LocTray.csproj": {}
   },
   "projects": {
-    "D:\\Documenten Rowan Klop\\Documents\\GitHub\\LocTray\\LocTray.csproj": {
+    "C:\\Users\\klopr\\Documents\\GitHub\\LocTray\\LocTray.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "D:\\Documenten Rowan Klop\\Documents\\GitHub\\LocTray\\LocTray.csproj",
+        "projectUniqueName": "C:\\Users\\klopr\\Documents\\GitHub\\LocTray\\LocTray.csproj",
         "projectName": "LocTray",
-        "projectPath": "D:\\Documenten Rowan Klop\\Documents\\GitHub\\LocTray\\LocTray.csproj",
-        "packagesPath": "C:\\Users\\Rowan Klop\\.nuget\\packages\\",
-        "outputPath": "D:\\Documenten Rowan Klop\\Documents\\GitHub\\LocTray\\obj\\",
+        "projectPath": "C:\\Users\\klopr\\Documents\\GitHub\\LocTray\\LocTray.csproj",
+        "packagesPath": "C:\\Users\\klopr\\.nuget\\packages\\",
+        "outputPath": "C:\\Users\\klopr\\Documents\\GitHub\\LocTray\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
-          "C:\\Users\\Rowan Klop\\AppData\\Roaming\\NuGet\\NuGet.Config"
+          "C:\\Users\\klopr\\AppData\\Roaming\\NuGet\\NuGet.Config"
         ],
         "originalTargetFrameworks": [
           "net8.0-windows"
@@ -45,14 +45,6 @@
         "net8.0-windows": {
           "framework": "net8.0-windows7.0",
           "targetAlias": "net8.0-windows",
-          "dependencies": {
-            "Microsoft.NET.ILLink.Tasks": {
-              "suppressParent": "All",
-              "target": "Package",
-              "version": "[8.0.27, )",
-              "autoReferenced": true
-            }
-          },
           "imports": [
             "net461",
             "net462",
@@ -70,10 +62,6 @@
               "version": "[8.0.27, 8.0.27]"
             },
             {
-              "name": "Microsoft.AspNetCore.App.Runtime.win-x64",
-              "version": "[8.0.27, 8.0.27]"
-            },
-            {
               "name": "Microsoft.NETCore.App.Host.win-x64",
               "version": "[8.0.27, 8.0.27]"
             },
@@ -82,15 +70,7 @@
               "version": "[8.0.27, 8.0.27]"
             },
             {
-              "name": "Microsoft.NETCore.App.Runtime.win-x64",
-              "version": "[8.0.27, 8.0.27]"
-            },
-            {
               "name": "Microsoft.WindowsDesktop.App.Ref",
-              "version": "[8.0.27, 8.0.27]"
-            },
-            {
-              "name": "Microsoft.WindowsDesktop.App.Runtime.win-x64",
               "version": "[8.0.27, 8.0.27]"
             }
           ],
@@ -103,11 +83,6 @@
             }
           },
           "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.300/PortableRuntimeIdentifierGraph.json"
-        }
-      },
-      "runtimes": {
-        "win-x64": {
-          "#import": []
         }
       }
     }

@@ -1,80 +1,261 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Drawing.Text;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
 namespace LocTray
 {
-    /// <summary>
-    /// Lange horizontale tekstbalk die over de taskbar zit, met alle live stats
-    /// als één regel: CPU | RAM | drives | R/W | Ping. Versleepbaar, positie wordt onthouden.
-    /// </summary>
-    public sealed class TaskbarBar : Form
+    // One labelled stat segment: "CPU" + "45%" in a colour.
+    public record Seg(string Label, string Value, Color Color);
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  TaskbarBar — hybrid display:
+    //   • A row of EMPTY (transparent) Shell_NotifyIcon tray icons reserves space
+    //     and is promoted out of the "^" overflow, so the slot sits next to the
+    //     clock and stays left-aligned exactly like normal tray icons.
+    //   • A top-most overlay window (StatOverlay) is painted directly over those
+    //     reserved slots, drawing the full readable "CPU 45%  RAM 62% …" text.
+    //  Together: perfect tray placement + legible labelled text.
+    // ═══════════════════════════════════════════════════════════════════════════
+    public sealed class TaskbarBar : IDisposable
     {
-        private float _cpu, _ram, _read, _write;
-        private long _ping = -1;
-        private List<(string letter, double used, double total, int pct)> _drives = new();
+        [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr h);
 
-        private static readonly Color BG         = Color.FromArgb(28, 28, 34);
-        private static readonly Color BORDER     = Color.FromArgb(70, 75, 88);
-        private static readonly Color SEP        = Color.FromArgb(90, 95, 110);
-        private static readonly Color TEXT       = Color.FromArgb(232, 232, 238);
-        private static readonly Color TEXT_DIM   = Color.FromArgb(160, 162, 170);
-        private static readonly Color CPU_COLOR  = Color.FromArgb(96, 180, 255);
-        private static readonly Color RAM_COLOR  = Color.FromArgb(190, 140, 255);
-        private static readonly Color DISK_COLOR = Color.FromArgb(120, 200, 100);
-        private static readonly Color NET_COLOR  = Color.FromArgb(255, 180, 80);
-        private static readonly Color HOT        = Color.FromArgb(255, 90, 90);
+        // Per-stat colours
+        static readonly Color C_CPU  = Color.FromArgb( 96, 180, 255);
+        static readonly Color C_RAM  = Color.FromArgb(190, 140, 255);
+        static readonly Color C_DISK = Color.FromArgb(120, 200, 100);
+        static readonly Color C_PING = Color.FromArgb(255, 180,  80);
+        static readonly Color C_HOT  = Color.FromArgb(255,  85,  85);
 
-        private bool _dragging;
-        private Point _dragStart;
-        private bool _userPositioned;
+        private readonly List<NotifyIcon> _icons = new();
+        private readonly StatOverlay _overlay = new();
+        private Icon? _blank;
+        private ContextMenuStrip? _menu;
+        private bool _visible;
+        private int  _promoteTicks;
+        private bool _explorerRestarted;
 
-        private record Segment(string Label, string Value, Color LabelColor);
+        float _cpu, _ram;
+        long  _ping = -1;
+        List<(string letter, double used, double total, int pct)> _drives = new();
+
+        // ── Public API (unchanged signature) ─────────────────────────────────
+        public ContextMenuStrip? ContextMenuStrip
+        {
+            get => _menu;
+            set
+            {
+                _menu = value;
+                _overlay.ContextMenuStrip = value;
+                foreach (var n in _icons) n.ContextMenuStrip = value;
+            }
+        }
 
         public TaskbarBar()
         {
+            _blank = MakeBlankIcon();
+        }
+
+        public void Show()
+        {
+            _visible = true;
+            foreach (var n in _icons) n.Visible = true;
+            _overlay.Show();
+            _promoteTicks = 12;
+            PromoteOutOfOverflow();
+        }
+
+        public void Hide()
+        {
+            _visible = false;
+            foreach (var n in _icons) n.Visible = false;
+            _overlay.Hide();
+        }
+
+        public void UpdateStats(float cpu, float ram, float read, float write, long pingMs,
+                                List<(string, double, double, int)> drives)
+        {
+            _cpu = cpu; _ram = ram; _ping = pingMs; _drives = drives;
+
+            var segs = BuildSegs();
+
+            // Paint the text overlay; it returns how wide the text is in pixels.
+            int width = _overlay.UpdateSegments(segs);
+
+            // Reserve that width with enough empty tray icons (over-estimate is
+            // harmless — extra slots are fully transparent).
+            int slot  = Math.Max(16, (int)(22 * _overlay.DeviceDpi / 96.0));
+            int count = Math.Clamp((int)Math.Ceiling((double)width / slot), 1, 24);
+            EnsureIcons(count);
+
+            if (_promoteTicks > 0) { _promoteTicks--; PromoteOutOfOverflow(); }
+        }
+
+        public void Dispose()
+        {
+            foreach (var n in _icons) { n.Visible = false; n.Dispose(); }
+            _icons.Clear();
+            _blank?.Dispose(); _blank = null;
+            _overlay.Dispose();
+        }
+
+        // ── Build labelled segments ──────────────────────────────────────────
+        private List<Seg> BuildSegs()
+        {
+            var list = new List<Seg>
+            {
+                new("CPU", $"{(int)Math.Round(_cpu)}%", _cpu >= 85 ? C_HOT : C_CPU),
+                new("RAM", $"{(int)Math.Round(_ram)}%", _ram >= 85 ? C_HOT : C_RAM),
+            };
+
+            foreach (var d in _drives)
+                list.Add(new($"{d.letter.TrimEnd('\\', ':')}:", $"{d.pct}%",
+                             d.pct >= 90 ? C_HOT : C_DISK));
+
+            list.Add(new("PING", _ping < 0 ? "—" : $"{_ping}ms", C_PING));
+            return list;
+        }
+
+        // ── Keep the empty-icon row at the requested count ───────────────────
+        private void EnsureIcons(int count)
+        {
+            while (_icons.Count < count)
+            {
+                var n = new NotifyIcon
+                {
+                    ContextMenuStrip = _menu,
+                    Icon             = _blank,
+                    Visible          = _visible,
+                };
+                _icons.Add(n);
+            }
+            while (_icons.Count > count)
+            {
+                var last = _icons[^1];
+                last.Visible = false; last.Dispose();
+                _icons.RemoveAt(_icons.Count - 1);
+            }
+        }
+
+        private static Icon MakeBlankIcon()
+        {
+            using var bmp = new Bitmap(32, 32, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(bmp)) g.Clear(Color.Transparent);
+            IntPtr h = bmp.GetHicon();
+            try   { return (Icon)Icon.FromHandle(h).Clone(); }
+            finally { DestroyIcon(h); }
+        }
+
+        // ── Promote our (empty) tray icons out of the Win11 overflow flyout ───
+        private void PromoteOutOfOverflow()
+        {
+            try
+            {
+                string exe = Environment.ProcessPath ?? Application.ExecutablePath;
+
+                using var root = Registry.CurrentUser.OpenSubKey(
+                    @"Control Panel\NotifyIconSettings", writable: true);
+                if (root == null) return;
+
+                bool changed = false;
+                foreach (var name in root.GetSubKeyNames())
+                {
+                    using var sub = root.OpenSubKey(name, writable: true);
+                    if (sub?.GetValue("ExecutablePath") is not string path) continue;
+                    if (!string.Equals(path, exe, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    if (sub.GetValue("IsPromoted") is not int p || p != 1)
+                    {
+                        sub.SetValue("IsPromoted", 1, RegistryValueKind.DWord);
+                        changed = true;
+                    }
+                }
+
+                if (changed && _visible)
+                    foreach (var n in _icons) { n.Visible = false; n.Visible = true; }
+
+                if (!_explorerRestarted && !PromotionBootstrapped())
+                {
+                    _explorerRestarted = true;
+                    MarkPromotionBootstrapped();
+                    RestartExplorer();
+                }
+            }
+            catch { }
+        }
+
+        private static bool PromotionBootstrapped()
+        {
+            using var k = Registry.CurrentUser.OpenSubKey(@"Software\LocTray");
+            return k?.GetValue("PromotionBootstrapped") is int v && v == 1;
+        }
+
+        private static void MarkPromotionBootstrapped()
+        {
+            using var k = Registry.CurrentUser.CreateSubKey(@"Software\LocTray");
+            k?.SetValue("PromotionBootstrapped", 1, RegistryValueKind.DWord);
+        }
+
+        private static void RestartExplorer()
+        {
+            try
+            {
+                foreach (var p in System.Diagnostics.Process.GetProcessesByName("explorer"))
+                {
+                    try { p.Kill(); } catch { }
+                }
+                try { System.Diagnostics.Process.Start("explorer.exe"); } catch { }
+            }
+            catch { }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  StatOverlay — borderless top-most window painted over the reserved tray
+    //  slots, showing the readable labelled stats.
+    // ═══════════════════════════════════════════════════════════════════════════
+    internal sealed class StatOverlay : Form
+    {
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern IntPtr FindWindow(string? cls, string? title);
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern IntPtr FindWindowEx(IntPtr parent, IntPtr child, string? cls, string? title);
+        [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
+        [DllImport("user32.dll")]
+        static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct RECT { public int Left, Top, Right, Bottom; }
+
+        static readonly IntPtr HWND_TOPMOST = new(-1);
+        const uint SWP_NOACTIVATE = 0x0010, SWP_SHOWWINDOW = 0x0040;
+        const int WS_EX_NOACTIVATE = 0x08000000, WS_EX_TOOLWINDOW = 0x80, WS_EX_LAYERED = 0x80000;
+        const int WM_SETTINGCHANGE = 0x001A, WM_DISPLAYCHANGE = 0x007E;
+
+        static readonly Color C_LABEL = Color.FromArgb(210, 213, 222);
+        const int PAD_X = 8, GAP = 12;
+
+        private readonly Font _fLabel = new("Segoe UI", 9f, FontStyle.Regular);
+        private readonly Font _fValue = new("Segoe UI Semibold", 9f, FontStyle.Bold);
+        private List<Seg> _segs = new();
+
+        public StatOverlay()
+        {
             FormBorderStyle = FormBorderStyle.None;
-            ShowInTaskbar = false;
-            TopMost = true;
-            BackColor = BG;
-            Opacity = 0.96;
-            StartPosition = FormStartPosition.Manual;
-            Width = 600;
-            Height = 32;
-            DoubleBuffered = true;
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
-            Cursor = Cursors.SizeAll;
-
-            MouseDown += (_, e) =>
-            {
-                if (e.Button == MouseButtons.Left)
-                {
-                    _dragging = true;
-                    _dragStart = e.Location;
-                }
-            };
-            MouseMove += (_, e) =>
-            {
-                if (_dragging)
-                {
-                    _userPositioned = true;
-                    Location = new Point(Left + e.X - _dragStart.X, Top + e.Y - _dragStart.Y);
-                }
-            };
-            MouseUp += (_, e) =>
-            {
-                if (_dragging)
-                {
-                    _dragging = false;
-                    SavePosition();
-                }
-            };
-
-            LoadPosition();
+            ShowInTaskbar   = false;
+            TopMost         = true;
+            StartPosition   = FormStartPosition.Manual;
+            DoubleBuffered  = true;
+            BackColor       = Color.FromArgb(1, 1, 1);
+            TransparencyKey = Color.FromArgb(1, 1, 1);
+            SetStyle(ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.OptimizedDoubleBuffer |
+                     ControlStyles.UserPaint, true);
         }
 
         protected override CreateParams CreateParams
@@ -82,186 +263,124 @@ namespace LocTray
             get
             {
                 var cp = base.CreateParams;
-                cp.ClassStyle |= 0x20000; // CS_DROPSHADOW
+                cp.ExStyle |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED;
                 return cp;
             }
         }
 
-        // Niet de focus stelen van het actieve venster
         protected override bool ShowWithoutActivation => true;
 
-        public void UpdateStats(float cpu, float ram, float read, float write, long pingMs,
-                                List<(string, double, double, int)> drives)
+        protected override void WndProc(ref Message m)
         {
-            _cpu = cpu;
-            _ram = ram;
-            _read = read;
-            _write = write;
-            _ping = pingMs;
-            _drives = drives;
-            ResizeToContent();
-            if (Visible) Invalidate();
+            base.WndProc(ref m);
+            if (m.Msg == WM_SETTINGCHANGE || m.Msg == WM_DISPLAYCHANGE) Reposition();
         }
 
-        private List<Segment> BuildSegments()
+        // Returns the rendered text width in pixels.
+        public int UpdateSegments(List<Seg> segs)
         {
-            var list = new List<Segment>
-            {
-                new("CPU", $"{(int)Math.Round(_cpu)}%", _cpu >= 85 ? HOT : CPU_COLOR),
-                new("RAM", $"{(int)Math.Round(_ram)}%", _ram >= 85 ? HOT : RAM_COLOR)
-            };
-            foreach (var d in _drives)
-                list.Add(new(d.letter, $"{d.used:0}/{d.total:0}GB ({d.pct}%)", DISK_COLOR));
-            list.Add(new("R/W", $"{_read / 1048576:0.0} / {_write / 1048576:0.0} MB/s", TEXT_DIM));
-            list.Add(new("Ping", _ping < 0 ? "—" : $"{_ping} ms", NET_COLOR));
-            return list;
+            _segs = segs;
+            Reposition();
+            Invalidate();
+            return Width;
         }
 
-        private void ResizeToContent()
+        private int MeasureWidth(Graphics g)
         {
-            using var bmp = new Bitmap(1, 1);
-            using var g = Graphics.FromImage(bmp);
-            using var fLabel = new Font("Segoe UI", 9);
-            using var fBold  = new Font("Segoe UI Semibold", 9.5f);
-
-            int width = 14;
-            var segments = BuildSegments();
-            for (int i = 0; i < segments.Count; i++)
+            float w = PAD_X;
+            for (int i = 0; i < _segs.Count; i++)
             {
-                width += (int)Math.Ceiling(g.MeasureString(segments[i].Label, fLabel).Width) + 5;
-                width += (int)Math.Ceiling(g.MeasureString(segments[i].Value, fBold).Width) + 8;
-                if (i < segments.Count - 1) width += 13;
+                w += g.MeasureString(_segs[i].Label, _fLabel).Width + 4f;
+                w += g.MeasureString(_segs[i].Value, _fValue).Width;
+                if (i < _segs.Count - 1) w += GAP;
             }
-            width += 14;
-
-            if (Width != width) Width = width;
-            if (Height != 32) Height = 32;
-            if (!_userPositioned) DockOverTaskbarRight();
+            return (int)Math.Ceiling(w) + PAD_X;
         }
 
-        private void DockOverTaskbarRight()
+        private void Reposition()
         {
-            var screen = Screen.PrimaryScreen;
-            if (screen == null) return;
-            var bounds = screen.Bounds;
-            var work = screen.WorkingArea;
-            const int trayEstimate = 320;
+            if (!IsHandleCreated || _segs.Count == 0) return;
 
-            if (work.Bottom < bounds.Bottom)            // taskbar onderaan
-            {
-                Height = bounds.Bottom - work.Bottom;
-                Top = work.Bottom;
-                Left = bounds.Right - trayEstimate - Width;
-            }
-            else if (work.Top > bounds.Top)             // taskbar bovenaan
-            {
-                Height = work.Top - bounds.Top;
-                Top = bounds.Top;
-                Left = bounds.Right - trayEstimate - Width;
-            }
-            else                                         // autohide / geen taskbar
-            {
-                Top = bounds.Bottom - Height;
-                Left = bounds.Right - trayEstimate - Width;
-            }
-        }
+            IntPtr tray = FindWindow("Shell_TrayWnd", null);
+            if (tray == IntPtr.Zero || !GetWindowRect(tray, out var tb)) return;
 
-        private void LoadPosition()
-        {
-            try
-            {
-                using var k = Registry.CurrentUser.OpenSubKey(@"Software\LocTray");
-                if (k?.GetValue("BarX") is int x && k.GetValue("BarY") is int y)
-                {
-                    var loc = new Point(x, y);
-                    var vs = SystemInformation.VirtualScreen;
-                    if (loc.X >= vs.Left - 100 && loc.X < vs.Right - 100 &&
-                        loc.Y >= vs.Top  - 50  && loc.Y < vs.Bottom)
-                    {
-                        Location = loc;
-                        _userPositioned = true;
-                    }
-                }
-            }
-            catch { }
-        }
+            int barH = tb.Bottom - tb.Top;
+            int rightEdge = tb.Right;
+            IntPtr notify = FindWindowEx(tray, IntPtr.Zero, "TrayNotifyWnd", null);
+            if (notify != IntPtr.Zero && GetWindowRect(notify, out var nb))
+                rightEdge = nb.Left;
 
-        private void SavePosition()
-        {
-            try
-            {
-                using var k = Registry.CurrentUser.CreateSubKey(@"Software\LocTray");
-                k.SetValue("BarX", Location.X, RegistryValueKind.DWord);
-                k.SetValue("BarY", Location.Y, RegistryValueKind.DWord);
-            }
-            catch { }
+            int w;
+            using (var g = CreateGraphics()) w = MeasureWidth(g);
+
+            int h = Math.Min(barH, 40);
+            int x = rightEdge - w - 4;
+            int y = tb.Top + (barH - h) / 2;
+
+            if (Size.Width != w || Size.Height != h) Size = new Size(w, h);
+            SetWindowPos(Handle, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.HighQuality;
-            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+            g.Clear(TransparencyKey);
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
 
-            using var border = new Pen(BORDER, 1);
-            g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+            using var lBr = new SolidBrush(C_LABEL);
+            float x = PAD_X, midY = Height / 2f;
 
-            using var fLabel = new Font("Segoe UI", 9);
-            using var fBold  = new Font("Segoe UI Semibold", 9.5f);
-            using var bMain  = new SolidBrush(TEXT);
-            using var sepPen = new Pen(SEP, 1);
-
-            var segments = BuildSegments();
-            int x = 14;
-            int yLabel = (Height - 14) / 2;
-
-            for (int i = 0; i < segments.Count; i++)
+            for (int i = 0; i < _segs.Count; i++)
             {
-                var s = segments[i];
-                using var labelBr = new SolidBrush(s.LabelColor);
+                var s = _segs[i];
 
-                g.DrawString(s.Label, fLabel, labelBr, x, yLabel);
-                x += (int)Math.Ceiling(g.MeasureString(s.Label, fLabel).Width) + 5;
+                var lSz = g.MeasureString(s.Label, _fLabel);
+                g.DrawString(s.Label, _fLabel, lBr, x, midY - lSz.Height / 2f);
+                x += lSz.Width + 4f;
 
-                g.DrawString(s.Value, fBold, bMain, x, yLabel - 1);
-                x += (int)Math.Ceiling(g.MeasureString(s.Value, fBold).Width) + 8;
-
-                if (i < segments.Count - 1)
-                {
-                    g.DrawLine(sepPen, x, 7, x, Height - 7);
-                    x += 13;
-                }
+                using var vBr = new SolidBrush(s.Color);
+                var vSz = g.MeasureString(s.Value, _fValue);
+                g.DrawString(s.Value, _fValue, vBr, x, midY - vSz.Height / 2f);
+                x += vSz.Width + GAP;
             }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { _fLabel.Dispose(); _fValue.Dispose(); }
+            base.Dispose(disposing);
         }
     }
 
-    /// <summary>
-    /// Vergrote, schonere welkomstpopup met meer info.
-    /// </summary>
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  WelcomePopup — shown once on first install
+    // ═══════════════════════════════════════════════════════════════════════════
     public sealed class WelcomePopup : Form
     {
         public WelcomePopup()
         {
             FormBorderStyle = FormBorderStyle.None;
-            BackColor = Color.FromArgb(28, 30, 36);
-            ShowInTaskbar = false;
-            StartPosition = FormStartPosition.CenterScreen;
-            Size = new Size(540, 400);
-            TopMost = true;
-            DoubleBuffered = true;
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+            BackColor       = Color.FromArgb(22, 24, 30);
+            ShowInTaskbar   = false;
+            StartPosition   = FormStartPosition.CenterScreen;
+            Size            = new Size(480, 300);
+            TopMost         = true;
+            DoubleBuffered  = true;
+            SetStyle(ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.OptimizedDoubleBuffer |
+                     ControlStyles.UserPaint, true);
 
             var btn = new Button
             {
-                Text = "Begrepen",
-                BackColor = Color.FromArgb(80, 170, 255),
+                Text      = "Got it",
+                BackColor = Color.FromArgb(72, 158, 255),
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI Semibold", 10),
-                Size = new Size(160, 40),
-                Location = new Point((Width - 160) / 2, Height - 70),
-                Cursor = Cursors.Hand,
-                TabStop = false
+                Font      = new Font("Segoe UI Semibold", 10),
+                Size      = new Size(120, 34),
+                Location  = new Point((480 - 120) / 2, 300 - 52),
+                Cursor    = Cursors.Hand,
+                TabStop   = false
             };
             btn.FlatAppearance.BorderSize = 0;
             btn.Click += (_, _) => Close();
@@ -271,69 +390,45 @@ namespace LocTray
 
         protected override CreateParams CreateParams
         {
-            get
-            {
-                var cp = base.CreateParams;
-                cp.ClassStyle |= 0x20000;
-                return cp;
-            }
+            get { var cp = base.CreateParams; cp.ClassStyle |= 0x20000; return cp; }
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.HighQuality;
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
-            using var border = new Pen(Color.FromArgb(60, 64, 76), 1);
+            using var border = new Pen(Color.FromArgb(50, 53, 65), 1);
             g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+            using (var acc = new SolidBrush(Color.FromArgb(72, 158, 255)))
+                g.FillRectangle(acc, 0, 0, Width, 4);
 
-            // Bovenste accent-strip
-            using (var accent = new SolidBrush(Color.FromArgb(80, 170, 255)))
-                g.FillRectangle(accent, 0, 0, Width, 4);
+            using var fT = new Font("Segoe UI Semibold", 19);
+            using var fS = new Font("Segoe UI", 10.5f);
+            using var fL = new Font("Segoe UI", 9.5f);
+            using var fD = new Font("Segoe UI", 8.5f, FontStyle.Italic);
 
-            using var titleFont = new Font("Segoe UI Semibold", 20);
-            using var subFont   = new Font("Segoe UI", 11);
-            using var bodyFont  = new Font("Segoe UI Semibold", 10);
-            using var listFont  = new Font("Segoe UI", 10);
-            using var dimFont   = new Font("Segoe UI", 9.5f, FontStyle.Italic);
+            using var wBr = new SolidBrush(Color.White);
+            using var sBr = new SolidBrush(Color.FromArgb(130, 190, 255));
+            using var lBr = new SolidBrush(Color.FromArgb(200, 202, 215));
+            using var dBr = new SolidBrush(Color.FromArgb(120, 122, 135));
 
-            using var titleBr  = new SolidBrush(Color.White);
-            using var subBr    = new SolidBrush(Color.FromArgb(150, 200, 255));
-            using var bodyBr   = new SolidBrush(Color.FromArgb(232, 232, 238));
-            using var listBr   = new SolidBrush(Color.FromArgb(210, 212, 220));
-            using var dimBr    = new SolidBrush(Color.FromArgb(150, 152, 160));
-            using var bulletBr = new SolidBrush(Color.FromArgb(80, 170, 255));
+            int x = 36, y = 28;
+            g.DrawString("LocTray", fT, wBr, x, y);                  y += 36;
+            g.DrawString("Successfully installed!", fS, sBr, x, y);  y += 32;
 
-            int x = 36;
-            int y = 38;
+            string[] items =
+            [
+                "→  Live labelled stats, docked next to the clock",
+                "→  CPU   RAM   C: (% used)   Ping",
+                "→  Full readable text — no hover needed",
+                "→  Right-click the bar for options or to exit",
+                "→  Starts automatically with Windows",
+            ];
+            foreach (var item in items) { g.DrawString(item, fL, lBr, x, y); y += 24; }
 
-            g.DrawString("LocTray", titleFont, titleBr, x, y);
-            y += 42;
-            g.DrawString("Correctly installed!", subFont, subBr, x, y);
-            y += 36;
-            g.DrawString("Wat je nu hebt", bodyFont, bodyBr, x, y);
-            y += 30;
-
-            string[] bullets =
-            {
-                "Live stats-balk boven je taskbar",
-                "CPU, RAM, schijven, R/W én ping",
-                "Updates elke seconde",
-                "Versleep met linkermuis naar gewenste plek",
-                "Rechtsklik op de balk voor opties",
-                "Auto-start staat al aan voor volgende keer"
-            };
-            foreach (var b in bullets)
-            {
-                g.FillEllipse(bulletBr, x + 2, y + 7, 6, 6);
-                g.DrawString(b, listFont, listBr, x + 18, y);
-                y += 26;
-            }
-
-            y += 6;
-            g.DrawString("Tip: kies 'Afsluiten' in het rechtsklik-menu om te stoppen.",
-                         dimFont, dimBr, x, y);
+            y += 4;
+            g.DrawString("Tip: right-click the stats area to exit LocTray.", fD, dBr, x, y);
         }
     }
 }
