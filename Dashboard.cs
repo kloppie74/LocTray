@@ -1058,10 +1058,10 @@ namespace LocTray
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    //  LiveDashboard — full-window "Task Manager-style" view. Opened from the
-    //  popup's expand arrow. Real resizable Form with a dark Win11 title bar,
-    //  live sparklines for CPU/RAM, per-core bars, network bandwidth and a
-    //  thermal-zone reading when the motherboard exposes one.
+    //  LiveDashboard — full-window dashboard opened from the popup's expand
+    //  arrow. Three rows of cards: CPU+MEM hero with sparklines & per-core
+    //  bars, full-width storage with per-drive read/write, then GPU/Network/
+    //  System (+ Battery on laptops). Status pill in the header.
     // ═══════════════════════════════════════════════════════════════════════════
     public sealed class LiveDashboard : Form
     {
@@ -1085,6 +1085,13 @@ namespace LocTray
         static readonly Color A_DSK = Color.FromArgb(120, 200, 100), B_DSK = Color.FromArgb(160, 224, 144);
         static readonly Color A_GPU = Color.FromArgb(255, 159,  78);
         static readonly Color A_NET = Color.FromArgb( 78, 210, 200);
+        static readonly Color A_SYS = Color.FromArgb(180, 185, 200);
+        static readonly Color A_BAT = Color.FromArgb(120, 200, 100);
+
+        // Status pill colors (green / amber / red)
+        static readonly Color S_GOOD = Color.FromArgb(120, 200, 100);
+        static readonly Color S_WARN = Color.FromArgb(255, 180,  80);
+        static readonly Color S_BAD  = Color.FromArgb(255, 110, 130);
 
         private static LiveDashboard? _open;
 
@@ -1114,27 +1121,33 @@ namespace LocTray
 
         private readonly PerformanceCounter[]? _coreCounters;
         private readonly float[]? _coreValues;
+        private readonly PerformanceCounter? _threadsCounter;
 
         private readonly NetworkInterface? _netIface;
         private long _prevSent, _prevRecv;
         private double _bpsSent, _bpsRecv;
 
-        private float _thermalC = -1;
-        private int _procCount;
+        private readonly Dictionary<string, PerformanceCounter>? _diskReadCnt;
+        private readonly Dictionary<string, PerformanceCounter>? _diskWriteCnt;
+        private readonly Dictionary<string, (double r, double w)> _diskRates = new();
+
+        private float _thermalC = -1f;
+        private int _procCount, _threadCount;
+        private readonly bool _hasBattery;
 
         private LiveDashboard(TaskbarBar bar)
         {
             _bar  = bar;
             _info = SystemInfo.Gather();
             _ext  = ExtendedStats.Gather();
+            _hasBattery = !SystemInformation.PowerStatus.BatteryChargeStatus
+                .HasFlag(BatteryChargeStatus.NoSystemBattery);
 
             Text            = "LocTray — Live Performance";
             BackColor       = BG_TOP;
             ForeColor       = TEXT_HI;
             ShowInTaskbar   = true;
             StartPosition   = FormStartPosition.CenterScreen;
-            ClientSize      = new Size(1000, 720);
-            MinimumSize     = new Size(880, 660);
             DoubleBuffered  = true;
             KeyPreview      = true;
             SetStyle(ControlStyles.AllPaintingInWmPaint |
@@ -1142,19 +1155,34 @@ namespace LocTray
                      ControlStyles.UserPaint |
                      ControlStyles.ResizeRedraw, true);
 
-            // Per-core CPU counters — PerformanceCounter at 500ms is fine here.
+            // Size adapts so the storage card always fits its drives.
+            int driveCount = Math.Max(1, _bar.GetDrives().Count);
+            int storageH = 56 + driveCount * 72;
+            int totalH = 24 + 90 + 14 + 300 + 14 + storageH + 14 + 140 + 24;
+            ClientSize  = new Size(1100, totalH);
+            MinimumSize = new Size(960, Math.Min(totalH, 760));
+
+            // Per-core CPU counters
             try
             {
-                int threads = Environment.ProcessorCount;
-                _coreCounters = new PerformanceCounter[threads];
-                for (int i = 0; i < threads; i++)
+                int t = Environment.ProcessorCount;
+                _coreCounters = new PerformanceCounter[t];
+                for (int i = 0; i < t; i++)
                     _coreCounters[i] = new PerformanceCounter("Processor", "% Processor Time", i.ToString());
                 foreach (var pc in _coreCounters) pc.NextValue();
-                _coreValues = new float[threads];
+                _coreValues = new float[t];
             }
             catch { _coreCounters = null; _coreValues = null; }
 
-            // Pick the fastest live network adapter (for ↓↑ throughput).
+            // System-wide thread count
+            try
+            {
+                _threadsCounter = new PerformanceCounter("System", "Threads", "");
+                _threadsCounter.NextValue();
+            }
+            catch { _threadsCounter = null; }
+
+            // Fastest live network adapter for ↓↑ throughput
             try
             {
                 _netIface = NetworkInterface.GetAllNetworkInterfaces()
@@ -1171,6 +1199,26 @@ namespace LocTray
                 }
             }
             catch { _netIface = null; }
+
+            // Per-drive read/write counters (PhysicalDisk → matched by letter)
+            try
+            {
+                _diskReadCnt  = new Dictionary<string, PerformanceCounter>();
+                _diskWriteCnt = new Dictionary<string, PerformanceCounter>();
+                var cat = new PerformanceCounterCategory("PhysicalDisk");
+                var instances = cat.GetInstanceNames();
+                foreach (var d in _bar.GetDrives())
+                {
+                    var inst = instances.FirstOrDefault(n => n.Contains(d.letter + ":"));
+                    if (inst == null) continue;
+                    var r = new PerformanceCounter("PhysicalDisk", "Disk Read Bytes/sec",  inst);
+                    var w = new PerformanceCounter("PhysicalDisk", "Disk Write Bytes/sec", inst);
+                    try { r.NextValue(); w.NextValue(); } catch { }
+                    _diskReadCnt[d.letter]  = r;
+                    _diskWriteCnt[d.letter] = w;
+                }
+            }
+            catch { _diskReadCnt = null; _diskWriteCnt = null; }
 
             _refresh = new System.Windows.Forms.Timer { Interval = 500 };
             _refresh.Tick += (_, _) => TickRefresh();
@@ -1204,13 +1252,11 @@ namespace LocTray
             _historyIdx++;
 
             if (_coreCounters != null && _coreValues != null)
-            {
                 for (int i = 0; i < _coreCounters.Length; i++)
-                {
-                    try { _coreValues[i] = _coreCounters[i].NextValue(); }
-                    catch { }
-                }
-            }
+                    try { _coreValues[i] = _coreCounters[i].NextValue(); } catch { }
+
+            if (_threadsCounter != null)
+                try { _threadCount = (int)_threadsCounter.NextValue(); } catch { }
 
             if (_netIface != null)
             {
@@ -1226,6 +1272,20 @@ namespace LocTray
                     _bpsRecv = dr * 2.0;
                 }
                 catch { }
+            }
+
+            if (_diskReadCnt != null && _diskWriteCnt != null)
+            {
+                foreach (var d in _bar.GetDrives())
+                {
+                    try
+                    {
+                        double r = _diskReadCnt.TryGetValue(d.letter, out var rc)  ? rc.NextValue() : 0;
+                        double w = _diskWriteCnt.TryGetValue(d.letter, out var wc) ? wc.NextValue() : 0;
+                        _diskRates[d.letter] = (r, w);
+                    }
+                    catch { }
+                }
             }
 
             try { _procCount = Process.GetProcesses().Length; } catch { }
@@ -1273,66 +1333,85 @@ namespace LocTray
                 new Rectangle(0, 0, ClientSize.Width, 2), A_CPU, A_MEM, 0f))
                 g.FillRectangle(acc, 0, 0, ClientSize.Width, 2);
 
-            const int PAD = 24;
-            int W = ClientSize.Width;
-            int leftW  = (int)((W - PAD * 3) * 0.6) + 4;
-            int rightX = PAD + leftW + PAD;
-            int rightW = W - rightX - PAD;
+            const int PAD = 24, GAP = 14;
+            int rowW = ClientSize.Width - PAD * 2;
 
-            // ── Header ────────────────────────────────────────────────────
-            int y = PAD;
-            using (var fT  = new Font("Segoe UI Semibold", 18f))
-            using (var fSt = new Font("Segoe UI", 9.5f))
-            {
-                using var hi = new SolidBrush(TEXT_HI);
-                using var md = new SolidBrush(TEXT_MD);
-                g.DrawString("Live Performance", fT, hi, PAD, y);
+            // Header (90h)
+            DrawHeader(g, PAD, PAD, rowW);
+            int y = PAD + 90 + GAP;
 
-                var up = TimeSpan.FromMilliseconds(Environment.TickCount64);
-                string upStr = up.TotalDays >= 1
-                    ? $"{(int)up.TotalDays}d {up.Hours}h {up.Minutes}m"
-                    : $"{up.Hours}h {up.Minutes}m {up.Seconds}s";
-                string sub = $"{_ext.MachineName}   ·   {_ext.OsName}   ·   Uptime {upStr}";
-                g.DrawString(sub, fSt, md, PAD, y + 34);
-            }
-            y += 74;
+            // Row 1 — CPU + MEM (50/50)
+            int colW = (rowW - GAP) / 2;
+            DrawCpuCard(g, PAD, y, colW, 300);
+            DrawMemCard(g, PAD + colW + GAP, y, colW, 300);
+            y += 300 + GAP;
 
-            int yL = y, yR = y;
+            // Row 2 — Storage (full width)
+            int drivesC = Math.Max(1, _bar.GetDrives().Count);
+            int storageH = 56 + drivesC * 72;
+            DrawStorageCard(g, PAD, y, rowW, storageH);
+            y += storageH + GAP;
 
-            // ── Left column: CPU + Memory ─────────────────────────────────
-            yL = DrawCpuCard(g, PAD, yL, leftW);
-            yL += 14;
-            DrawMemCard(g, PAD, yL, leftW);
-
-            // ── Right column: Storage, GPU, Network ───────────────────────
-            yR = DrawStorageCard(g, rightX, yR, rightW);
-            yR += 14;
-            yR = DrawGpuCard(g, rightX, yR, rightW);
-            yR += 14;
-            DrawNetCard(g, rightX, yR, rightW);
+            // Row 3 — GPU + Network + System (+ Battery on laptops)
+            int cards = _hasBattery ? 4 : 3;
+            int cardW = (rowW - GAP * (cards - 1)) / cards;
+            int rx = PAD;
+            DrawGpuCard(g, rx, y, cardW, 140);    rx += cardW + GAP;
+            DrawNetCard(g, rx, y, cardW, 140);    rx += cardW + GAP;
+            DrawSystemCard(g, rx, y, cardW, 140); rx += cardW + GAP;
+            if (_hasBattery) DrawBatteryCard(g, rx, y, cardW, 140);
         }
 
-        private int DrawCpuCard(Graphics g, int x, int y, int w)
+        // ──── Header ─────────────────────────────────────────────────────
+        private void DrawHeader(Graphics g, int x, int y, int w)
         {
-            const int h = 340;
+            var (cpu, ram, _) = _bar.GetLive();
+            var (statusText, statusColor) = GetStatus(cpu, ram);
+
+            using var fT  = new Font("Segoe UI Semibold", 20f);
+            using var fSt = new Font("Segoe UI", 9.5f);
+            using var hi  = new SolidBrush(TEXT_HI);
+            using var md  = new SolidBrush(TEXT_MD);
+
+            g.DrawString("Live Performance", fT, hi, x, y);
+
+            var up = TimeSpan.FromMilliseconds(Environment.TickCount64);
+            string upStr = up.TotalDays >= 1
+                ? $"{(int)up.TotalDays}d {up.Hours}h {up.Minutes}m"
+                : $"{up.Hours}h {up.Minutes}m {up.Seconds}s";
+            string sub = $"{_ext.MachineName}   ·   {_ext.OsName}   ·   Up {upStr}   ·   {_ext.UserName}";
+            g.DrawString(sub, fSt, md, x, y + 40);
+
+            // Status pill, right-aligned with title baseline
+            using var pillF = new Font("Segoe UI Semibold", 9.5f);
+            var pillSz = g.MeasureString(statusText, pillF);
+            int pillW = (int)pillSz.Width + 38;
+            int pillH = 28;
+            DrawStatusPill(g, x + w - pillW, y + 6, pillW, pillH, statusText, statusColor);
+        }
+
+        // ──── CPU Card ───────────────────────────────────────────────────
+        private void DrawCpuCard(Graphics g, int x, int y, int w, int h)
+        {
             DrawCardBg(g, x, y, w, h);
 
             using var fL   = new Font("Segoe UI Semibold", 9f);
-            using var fBig = new Font("Segoe UI Semibold", 30f);
+            using var fBig = new Font("Segoe UI Semibold", 28f);
             using var fH   = new Font("Segoe UI Semibold", 11.5f);
             using var fS   = new Font("Segoe UI", 9.5f);
-            using var fT   = new Font("Segoe UI Semibold", 8.5f);
+            using var fSm  = new Font("Segoe UI Semibold", 8.5f);
+            using var fmt  = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
 
-            using (var br = new SolidBrush(A_CPU))
-                g.DrawString("CPU", fL, br, x + 20, y + 16);
+            using (var br = new SolidBrush(A_CPU)) g.DrawString("CPU", fL, br, x + 20, y + 16);
             using (var br = new LinearGradientBrush(
                 new Rectangle(x + 20, y + 34, 28, 2), A_CPU, B_CPU, 0f))
                 g.FillRectangle(br, x + 20, y + 34, 28, 2);
 
+            int nameMaxW = w - 40 - 130;
             using (var br = new SolidBrush(TEXT_HI))
-                g.DrawString(_info.CpuName, fH, br, x + 20, y + 46);
+                g.DrawString(_info.CpuName, fH, br, new RectangleF(x + 20, y + 46, nameMaxW, 20), fmt);
 
-            string specs = $"{_info.CpuGhz:0.00} GHz  ·  {_info.CpuCores}C / {_info.CpuThreads}T";
+            string specs = $"{_info.CpuGhz:0.00} GHz  ·  {_info.CpuCores}C/{_info.CpuThreads}T  ·  {_ext.CpuArch}";
             if (_thermalC > 0) specs += $"  ·  {_thermalC:0} °C";
             using (var br = new SolidBrush(TEXT_MD))
                 g.DrawString(specs, fS, br, x + 20, y + 68);
@@ -1345,32 +1424,41 @@ namespace LocTray
                 g.DrawString(pctStr, fBig, br, x + w - pctSz.Width - 20, y + 12);
 
             // Sparkline
-            DrawSparkline(g, x + 20, y + 100, w - 40, 96, _cpuHistory, _historyIdx, A_CPU);
+            DrawSparkline(g, x + 20, y + 100, w - 40, 86, _cpuHistory, _historyIdx, A_CPU);
 
-            // Per-core bars
+            // Min / Avg / Max
+            var (mn, av, mx) = HistoryStats(_cpuHistory, _historyIdx);
+            DrawHistoryRow(g, x + 20, y + 196, mn, av, mx, A_CPU);
+
+            // Per-core
             using (var br = new SolidBrush(TEXT_MD))
-                g.DrawString("PER-CORE", fT, br, x + 20, y + 208);
+                g.DrawString("PER-CORE", fSm, br, x + 20, y + 220);
             if (_coreValues != null && _coreValues.Length > 0)
-                DrawCoreBars(g, x + 20, y + 228, w - 40, 60, _coreValues, A_CPU, B_CPU);
+                DrawCoreBars(g, x + 20, y + 238, w - 40, 40, _coreValues, A_CPU, B_CPU);
 
-            using (var br = new SolidBrush(TEXT_MD))
-                g.DrawString($"Processes  ·  {_procCount}", fS, br, x + 20, y + h - 28);
-
-            return y + h;
+            // Footer
+            string cache = "";
+            if (_ext.CpuL2KB > 0) cache += $"L2 {FmtKB(_ext.CpuL2KB)}";
+            if (_ext.CpuL3KB > 0) cache += (cache.Length > 0 ? "  ·  " : "") + $"L3 {FmtKB(_ext.CpuL3KB)}";
+            string footer = $"Processes {_procCount}  ·  Threads {_threadCount}";
+            if (cache.Length > 0) footer += $"  ·  {cache}";
+            using (var br = new SolidBrush(TEXT_LO))
+                g.DrawString(footer, fSm, br, new RectangleF(x + 20, y + h - 26, w - 40, 18), fmt);
         }
 
-        private int DrawMemCard(Graphics g, int x, int y, int w)
+        // ──── Memory Card ────────────────────────────────────────────────
+        private void DrawMemCard(Graphics g, int x, int y, int w, int h)
         {
-            const int h = 232;
             DrawCardBg(g, x, y, w, h);
 
             using var fL   = new Font("Segoe UI Semibold", 9f);
-            using var fBig = new Font("Segoe UI Semibold", 30f);
+            using var fBig = new Font("Segoe UI Semibold", 28f);
             using var fH   = new Font("Segoe UI Semibold", 11.5f);
             using var fS   = new Font("Segoe UI", 9.5f);
+            using var fSm  = new Font("Segoe UI Semibold", 8.5f);
+            using var fmt  = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
 
-            using (var br = new SolidBrush(A_MEM))
-                g.DrawString("MEMORY", fL, br, x + 20, y + 16);
+            using (var br = new SolidBrush(A_MEM)) g.DrawString("MEMORY", fL, br, x + 20, y + 16);
             using (var br = new LinearGradientBrush(
                 new Rectangle(x + 20, y + 34, 28, 2), A_MEM, B_MEM, 0f))
                 g.FillRectangle(br, x + 20, y + 34, 28, 2);
@@ -1378,47 +1466,57 @@ namespace LocTray
             string memHead = $"{_info.RamTotalGB:0.#} GB {_info.RamType}";
             if (_info.RamSpeedMhz > 0) memHead += $" @ {_info.RamSpeedMhz} MHz";
             using (var br = new SolidBrush(TEXT_HI))
-                g.DrawString(memHead, fH, br, x + 20, y + 46);
+                g.DrawString(memHead, fH, br, new RectangleF(x + 20, y + 46, w - 40 - 130, 20), fmt);
 
-            var (_, ram, _) = _bar.GetLive();
-            double usedGB = _info.RamTotalGB * ram / 100.0;
             string memSub = _info.RamMfr.Length > 0
-                ? $"{_info.RamMfr}  ·  {usedGB:0.#} / {_info.RamTotalGB:0.#} GB"
-                : $"{usedGB:0.#} / {_info.RamTotalGB:0.#} GB";
+                ? $"{_info.RamMfr}  ·  {_ext.MemoryModules} module{(_ext.MemoryModules == 1 ? "" : "s")}"
+                : $"{_ext.MemoryModules} module{(_ext.MemoryModules == 1 ? "" : "s")}";
             using (var br = new SolidBrush(TEXT_MD))
                 g.DrawString(memSub, fS, br, x + 20, y + 68);
 
+            var (_, ram, _) = _bar.GetLive();
             string pctStr = $"{ram:0.0}%";
             var pctSz = g.MeasureString(pctStr, fBig);
             using (var br = new SolidBrush(TEXT_HI))
                 g.DrawString(pctStr, fBig, br, x + w - pctSz.Width - 20, y + 12);
 
-            DrawSparkline(g, x + 20, y + 100, w - 40, 116, _ramHistory, _historyIdx, A_MEM);
+            DrawSparkline(g, x + 20, y + 100, w - 40, 86, _ramHistory, _historyIdx, A_MEM);
 
-            return y + h;
+            var (mn, av, mx) = HistoryStats(_ramHistory, _historyIdx);
+            DrawHistoryRow(g, x + 20, y + 196, mn, av, mx, A_MEM);
+
+            double usedGB = _info.RamTotalGB * ram / 100.0;
+            double freeGB = Math.Max(0, _info.RamTotalGB - usedGB);
+            using (var br = new SolidBrush(TEXT_MD))
+                g.DrawString($"Used {usedGB:0.#} GB  ·  Free {freeGB:0.#} GB", fS, br, x + 20, y + 224);
+
+            string pfLine = _ext.PageFileTotalMB > 0
+                ? $"Page file  {_ext.PageFileUsedMB / 1024.0:0.#} / {_ext.PageFileTotalMB / 1024.0:0.#} GB"
+                : "Page file  —";
+            using (var br = new SolidBrush(TEXT_LO))
+                g.DrawString(pfLine, fSm, br, x + 20, y + h - 26);
         }
 
-        private int DrawStorageCard(Graphics g, int x, int y, int w)
+        // ──── Storage Card ───────────────────────────────────────────────
+        private void DrawStorageCard(Graphics g, int x, int y, int w, int h)
         {
-            var drives = _bar.GetDrives();
-            int rows = Math.Max(1, drives.Count);
-            int h = 60 + rows * 50;
             DrawCardBg(g, x, y, w, h);
 
             using var fL = new Font("Segoe UI Semibold", 9f);
-            using var fH = new Font("Segoe UI Semibold", 11f);
+            using var fH = new Font("Segoe UI Semibold", 11.5f);
             using var fS = new Font("Segoe UI", 9f);
+            using var fmt = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
 
-            using (var br = new SolidBrush(A_DSK))
-                g.DrawString("STORAGE", fL, br, x + 20, y + 16);
+            using (var br = new SolidBrush(A_DSK)) g.DrawString("STORAGE", fL, br, x + 20, y + 16);
             using (var br = new SolidBrush(A_DSK))
                 g.FillRectangle(br, x + 20, y + 34, 28, 2);
 
+            var drives = _bar.GetDrives();
             if (drives.Count == 0)
             {
                 using var br = new SolidBrush(TEXT_LO);
-                g.DrawString("No fixed drives detected", fS, br, x + 20, y + 48);
-                return y + h;
+                g.DrawString("No fixed drives detected", fS, br, x + 20, y + 50);
+                return;
             }
 
             int rowY = y + 50;
@@ -1426,83 +1524,261 @@ namespace LocTray
             {
                 using (var br = new SolidBrush(TEXT_HI))
                     g.DrawString($"{d.letter}\\", fH, br, x + 20, rowY);
-                string info = $"{d.used:0.#} / {d.total:0.#} GB";
+
+                string model = _ext.DriveModels.TryGetValue(d.letter, out var m) ? m : "Local disk";
+                int modelW = w - 64 - 80 - 20;
                 using (var br = new SolidBrush(TEXT_MD))
-                    g.DrawString(info, fS, br, x + 68, rowY + 2);
+                    g.DrawString(model, fS, br, new RectangleF(x + 64, rowY + 2, modelW, 20), fmt);
 
                 string pctStr = $"{d.pct}%";
                 var pctSz = g.MeasureString(pctStr, fH);
                 using (var br = new SolidBrush(TEXT_HI))
                     g.DrawString(pctStr, fH, br, x + w - pctSz.Width - 20, rowY);
 
-                DrawProgressBar(g, x + 20, rowY + 24, w - 40, 6, d.pct, A_DSK, B_DSK);
-                rowY += 50;
-            }
+                using (var br = new SolidBrush(TEXT_MD))
+                    g.DrawString($"{d.used:0.#} / {d.total:0.#} GB", fS, br, x + 20, rowY + 24);
 
-            return y + h;
+                if (_diskRates.TryGetValue(d.letter, out var rw))
+                {
+                    string rwStr = $"↓ {FmtBps(rw.r)}    ↑ {FmtBps(rw.w)}";
+                    var rwSz = g.MeasureString(rwStr, fS);
+                    using var br = new SolidBrush(TEXT_MD);
+                    g.DrawString(rwStr, fS, br, x + w - rwSz.Width - 20, rowY + 24);
+                }
+
+                DrawProgressBar(g, x + 20, rowY + 50, w - 40, 6, d.pct, A_DSK, B_DSK);
+                rowY += 72;
+            }
         }
 
-        private int DrawGpuCard(Graphics g, int x, int y, int w)
+        // ──── GPU Card ───────────────────────────────────────────────────
+        private void DrawGpuCard(Graphics g, int x, int y, int w, int h)
         {
-            const int h = 100;
             DrawCardBg(g, x, y, w, h);
 
             using var fL = new Font("Segoe UI Semibold", 9f);
-            using var fH = new Font("Segoe UI Semibold", 11.5f);
+            using var fH = new Font("Segoe UI Semibold", 11f);
             using var fS = new Font("Segoe UI", 9.5f);
+            using var fmt = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
 
-            using (var br = new SolidBrush(A_GPU))
-                g.DrawString("GPU", fL, br, x + 20, y + 16);
+            using (var br = new SolidBrush(A_GPU)) g.DrawString("GPU", fL, br, x + 20, y + 16);
             using (var br = new SolidBrush(A_GPU))
                 g.FillRectangle(br, x + 20, y + 34, 28, 2);
 
+            int textW = w - 40;
+            int ty = y + 44;
             using (var br = new SolidBrush(TEXT_HI))
-                g.DrawString(_info.GpuName, fH, br, x + 20, y + 46);
-            string sub = _info.GpuMemoryGB > 0 ? $"{_info.GpuMemoryGB:0.#} GB VRAM" : "Graphics adapter";
+                g.DrawString(_info.GpuName, fH, br, new RectangleF(x + 20, ty, textW, 18), fmt);
+            ty += 20;
+            string vram = _info.GpuMemoryGB > 0 ? $"{_info.GpuMemoryGB:0.#} GB VRAM" : "Graphics adapter";
             using (var br = new SolidBrush(TEXT_MD))
-                g.DrawString(sub, fS, br, x + 20, y + 68);
-
-            return y + h;
+                g.DrawString(vram, fS, br, x + 20, ty);
+            ty += 18;
+            if (_ext.GpuDriver != "—")
+            {
+                using var br = new SolidBrush(TEXT_MD);
+                g.DrawString($"Driver {_ext.GpuDriver}", fS, br, new RectangleF(x + 20, ty, textW, 18), fmt);
+                ty += 18;
+            }
+            if (_ext.GpuResolution != "—")
+            {
+                using var br = new SolidBrush(TEXT_MD);
+                g.DrawString(_ext.GpuResolution, fS, br, x + 20, ty);
+            }
         }
 
-        private int DrawNetCard(Graphics g, int x, int y, int w)
+        // ──── Network Card ───────────────────────────────────────────────
+        private void DrawNetCard(Graphics g, int x, int y, int w, int h)
         {
-            const int h = 156;
             DrawCardBg(g, x, y, w, h);
 
-            using var fL    = new Font("Segoe UI Semibold", 9f);
-            using var fH    = new Font("Segoe UI Semibold", 11.5f);
-            using var fS    = new Font("Segoe UI", 9.5f);
-            using var fSpd  = new Font("Segoe UI Semibold", 13f);
+            using var fL = new Font("Segoe UI Semibold", 9f);
+            using var fH = new Font("Segoe UI Semibold", 11f);
+            using var fS = new Font("Segoe UI", 9.5f);
+            using var fmt = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
 
-            using (var br = new SolidBrush(A_NET))
-                g.DrawString("NETWORK", fL, br, x + 20, y + 16);
+            using (var br = new SolidBrush(A_NET)) g.DrawString("NETWORK", fL, br, x + 20, y + 16);
             using (var br = new SolidBrush(A_NET))
                 g.FillRectangle(br, x + 20, y + 34, 28, 2);
 
+            int textW = w - 40;
             using (var br = new SolidBrush(TEXT_HI))
-                g.DrawString(_ext.NetAdapterName, fH, br, x + 20, y + 46);
-            string sub = _ext.LocalIp == "—" ? "Ping to 8.8.8.8" : $"{_ext.LocalIp}  ·  Ping to 8.8.8.8";
-            using (var br = new SolidBrush(TEXT_MD))
-                g.DrawString(sub, fS, br, x + 20, y + 68);
+                g.DrawString(_ext.NetAdapterName, fH, br, new RectangleF(x + 20, y + 44, textW, 18), fmt);
 
-            // Throughput
-            string down = "↓ " + FmtBps(_bpsRecv);
-            string up   = "↑ " + FmtBps(_bpsSent);
+            string linkLine = _ext.LocalIp;
+            if (_ext.NetLinkSpeedBps > 0) linkLine += $"  ·  {FmtBits(_ext.NetLinkSpeedBps)}";
+            using (var br = new SolidBrush(TEXT_MD))
+                g.DrawString(linkLine, fS, br, new RectangleF(x + 20, y + 64, textW, 18), fmt);
+
             using (var br = new SolidBrush(TEXT_HI))
             {
-                g.DrawString(down, fSpd, br, x + 20, y + 96);
-                g.DrawString(up,   fSpd, br, x + 20, y + 122);
+                g.DrawString($"↓ {FmtBps(_bpsRecv)}", fS, br, x + 20, y + 86);
+                g.DrawString($"↑ {FmtBps(_bpsSent)}", fS, br, x + 20, y + 106);
             }
 
-            // Ping right side
             var (_, _, ping) = _bar.GetLive();
-            string p = ping < 0 ? "—" : $"{ping} ms";
-            var pSz = g.MeasureString(p, fSpd);
-            using (var br = new SolidBrush(TEXT_HI))
-                g.DrawString(p, fSpd, br, x + w - pSz.Width - 20, y + 108);
+            string p = ping < 0 ? "Ping —" : $"Ping {ping} ms";
+            var pSz = g.MeasureString(p, fS);
+            using (var br = new SolidBrush(TEXT_MD))
+                g.DrawString(p, fS, br, x + w - pSz.Width - 20, y + 106);
+        }
 
-            return y + h;
+        // ──── System Card ────────────────────────────────────────────────
+        private void DrawSystemCard(Graphics g, int x, int y, int w, int h)
+        {
+            DrawCardBg(g, x, y, w, h);
+
+            using var fL = new Font("Segoe UI Semibold", 9f);
+            using var fH = new Font("Segoe UI Semibold", 11f);
+            using var fS = new Font("Segoe UI", 9.5f);
+            using var fmt = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
+
+            using (var br = new SolidBrush(A_SYS)) g.DrawString("SYSTEM", fL, br, x + 20, y + 16);
+            using (var br = new SolidBrush(A_SYS))
+                g.FillRectangle(br, x + 20, y + 34, 28, 2);
+
+            int textW = w - 40;
+            using (var br = new SolidBrush(TEXT_HI))
+                g.DrawString(_ext.SystemModel, fH, br, new RectangleF(x + 20, y + 44, textW, 18), fmt);
+            using (var br = new SolidBrush(TEXT_MD))
+            {
+                g.DrawString(_ext.BiosInfo, fS, br, new RectangleF(x + 20, y + 64, textW, 18), fmt);
+                g.DrawString($"User  {_ext.UserName}", fS, br, new RectangleF(x + 20, y + 86, textW, 18), fmt);
+                g.DrawString($"Boot  {_ext.BootTime:d MMM HH:mm}", fS, br, x + 20, y + 106);
+            }
+        }
+
+        // ──── Battery Card ───────────────────────────────────────────────
+        private void DrawBatteryCard(Graphics g, int x, int y, int w, int h)
+        {
+            DrawCardBg(g, x, y, w, h);
+
+            var ps = SystemInformation.PowerStatus;
+            float frac = Math.Clamp(ps.BatteryLifePercent, 0f, 1f);
+
+            Color accent = A_BAT;
+            if (frac < 0.20f)      accent = S_BAD;
+            else if (frac < 0.50f) accent = S_WARN;
+
+            using var fL  = new Font("Segoe UI Semibold", 9f);
+            using var fH  = new Font("Segoe UI Semibold", 18f);
+            using var fS  = new Font("Segoe UI", 9.5f);
+
+            using (var br = new SolidBrush(accent)) g.DrawString("BATTERY", fL, br, x + 20, y + 16);
+            using (var br = new SolidBrush(accent))
+                g.FillRectangle(br, x + 20, y + 34, 28, 2);
+
+            int pctInt = (int)Math.Round(frac * 100);
+            using (var br = new SolidBrush(TEXT_HI))
+                g.DrawString($"{pctInt}%", fH, br, x + 20, y + 44);
+
+            string status;
+            if (ps.PowerLineStatus == PowerLineStatus.Online)
+                status = ps.BatteryChargeStatus.HasFlag(BatteryChargeStatus.High) ? "Plugged in  ·  Full" : "Charging";
+            else
+                status = "On battery";
+
+            int remaining = ps.BatteryLifeRemaining;
+            if (remaining > 0 && ps.PowerLineStatus != PowerLineStatus.Online)
+            {
+                var t = TimeSpan.FromSeconds(remaining);
+                string time = t.TotalHours >= 1 ? $"{(int)t.TotalHours}h {t.Minutes}m" : $"{t.Minutes}m";
+                status += $"  ·  {time} left";
+            }
+            using (var br = new SolidBrush(TEXT_MD))
+                g.DrawString(status, fS, br, x + 20, y + 80);
+
+            DrawProgressBar(g, x + 20, y + 108, w - 40, 6, pctInt, accent, Color.FromArgb(180, accent));
+        }
+
+        // ──── Status pill ────────────────────────────────────────────────
+        private static void DrawStatusPill(Graphics g, int x, int y, int w, int h,
+                                           string text, Color accent)
+        {
+            using var path = new GraphicsPath();
+            path.AddArc(x, y, h, h, 90, 180);
+            path.AddArc(x + w - h, y, h, h, 270, 180);
+            path.CloseFigure();
+
+            using (var bg = new SolidBrush(Color.FromArgb(38, accent)))
+                g.FillPath(bg, path);
+            using (var bd = new Pen(Color.FromArgb(90, accent), 1))
+                g.DrawPath(bd, path);
+
+            using (var dot = new SolidBrush(accent))
+                g.FillEllipse(dot, x + 12, y + h / 2 - 3, 6, 6);
+
+            using var f = new Font("Segoe UI Semibold", 9.5f);
+            using var br = new SolidBrush(accent);
+            g.DrawString(text, f, br, x + 26, y + 5);
+        }
+
+        // ──── History row (MIN / AVG / MAX) ──────────────────────────────
+        private static void DrawHistoryRow(Graphics g, int x, int y,
+                                           float min, float avg, float max, Color accent)
+        {
+            using var fL = new Font("Segoe UI Semibold", 8.5f);
+            using var fV = new Font("Segoe UI Semibold", 10f);
+            using var brAcc = new SolidBrush(accent);
+            using var brHi  = new SolidBrush(TEXT_HI);
+            using var brSep = new SolidBrush(TEXT_LO);
+
+            int cx = x;
+            void Draw(string lbl, float v, bool last)
+            {
+                var lSz = g.MeasureString(lbl, fL);
+                g.DrawString(lbl, fL, brAcc, cx, y + 2);
+                cx += (int)lSz.Width + 4;
+                string vStr = $"{v:0.0}%";
+                var vSz = g.MeasureString(vStr, fV);
+                g.DrawString(vStr, fV, brHi, cx, y);
+                cx += (int)vSz.Width;
+                if (!last)
+                {
+                    g.DrawString("  ·  ", fV, brSep, cx, y);
+                    cx += 20;
+                }
+            }
+            Draw("MIN", min, false);
+            Draw("AVG", avg, false);
+            Draw("MAX", max, true);
+        }
+
+        private static (float min, float avg, float max) HistoryStats(float[] h, int curIdx)
+        {
+            int count = Math.Min(curIdx, h.Length);
+            if (count == 0) return (0, 0, 0);
+            float min = float.MaxValue, max = 0, sum = 0;
+            int start = curIdx >= h.Length ? curIdx % h.Length : 0;
+            for (int i = 0; i < count; i++)
+            {
+                int idx = curIdx >= h.Length ? (start + i) % h.Length : i;
+                float v = h[idx];
+                if (v < min) min = v;
+                if (v > max) max = v;
+                sum += v;
+            }
+            return (min, sum / count, max);
+        }
+
+        private static (string text, Color color) GetStatus(float cpu, float ram)
+        {
+            if (cpu > 90 || ram > 90) return ("High load",          S_BAD);
+            if (cpu > 70 || ram > 80) return ("Busy",               S_WARN);
+            return                          ("All systems normal", S_GOOD);
+        }
+
+        private static string FmtBits(long bps)
+        {
+            if (bps < 1_000_000)     return $"{bps / 1000.0:0} Kbit";
+            if (bps < 1_000_000_000) return $"{bps / 1_000_000.0:0} Mbit";
+            return $"{bps / 1_000_000_000.0:0.0} Gbit";
+        }
+
+        private static string FmtKB(int kb)
+        {
+            if (kb >= 1024) return $"{kb / 1024.0:0.#} MB";
+            return $"{kb} KB";
         }
 
         private static string FmtBps(double bps)
@@ -1639,20 +1915,39 @@ namespace LocTray
             _refresh.Stop();
             _refresh.Dispose();
             if (_coreCounters != null)
-                foreach (var pc in _coreCounters)
-                    try { pc.Dispose(); } catch { }
+                foreach (var pc in _coreCounters) try { pc.Dispose(); } catch { }
+            try { _threadsCounter?.Dispose(); } catch { }
+            if (_diskReadCnt != null)
+                foreach (var pc in _diskReadCnt.Values) try { pc.Dispose(); } catch { }
+            if (_diskWriteCnt != null)
+                foreach (var pc in _diskWriteCnt.Values) try { pc.Dispose(); } catch { }
             base.OnFormClosed(e);
         }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    //  ExtendedStats — extras that only the full LiveDashboard shows.
+    //  ExtendedStats — extras that only the full LiveDashboard shows. Heavy
+    //  WMI queries gathered once when the dashboard opens.
     // ═══════════════════════════════════════════════════════════════════════════
     internal sealed record ExtendedStats(
         string OsName,
         string MachineName,
         string LocalIp,
-        string NetAdapterName)
+        string NetAdapterName,
+        long   NetLinkSpeedBps,
+        string BiosInfo,
+        string SystemModel,
+        DateTime BootTime,
+        string UserName,
+        int    CpuL2KB,
+        int    CpuL3KB,
+        string CpuArch,
+        int    MemoryModules,
+        int    PageFileUsedMB,
+        int    PageFileTotalMB,
+        string GpuDriver,
+        string GpuResolution,
+        Dictionary<string, string> DriveModels)
     {
         public static ExtendedStats Gather()
         {
@@ -1662,10 +1957,12 @@ namespace LocTray
                 { Major: 10 }                  => "Windows 10",
                 _                              => $"Windows {Environment.OSVersion.Version}"
             };
+            string machine  = Environment.MachineName;
+            string user     = Environment.UserName;
+            DateTime boot   = DateTime.Now - TimeSpan.FromMilliseconds(Environment.TickCount64);
 
-            string machine = Environment.MachineName;
             string ip = "—", adapter = "—";
-
+            long linkSpeed = 0;
             try
             {
                 var ni = NetworkInterface.GetAllNetworkInterfaces()
@@ -1677,6 +1974,7 @@ namespace LocTray
                 if (ni != null)
                 {
                     adapter = ni.Name;
+                    linkSpeed = ni.Speed;
                     var addr = ni.GetIPProperties().UnicastAddresses
                         .FirstOrDefault(a => a.Address.AddressFamily == AddressFamily.InterNetwork);
                     if (addr != null) ip = addr.Address.ToString();
@@ -1684,7 +1982,143 @@ namespace LocTray
             }
             catch { }
 
-            return new ExtendedStats(os, machine, ip, adapter);
+            string biosInfo = "—";
+            try
+            {
+                using var s = new ManagementObjectSearcher(
+                    "SELECT Manufacturer, SMBIOSBIOSVersion FROM Win32_BIOS");
+                foreach (ManagementObject mo in s.Get())
+                {
+                    string mfr = (mo["Manufacturer"]?.ToString() ?? "").Trim();
+                    string ver = (mo["SMBIOSBIOSVersion"]?.ToString() ?? "").Trim();
+                    if (mfr.Length > 0 || ver.Length > 0)
+                        biosInfo = $"{mfr} {ver}".Trim();
+                    break;
+                }
+            }
+            catch { }
+
+            string sysModel = "—";
+            try
+            {
+                using var s = new ManagementObjectSearcher(
+                    "SELECT Manufacturer, Model FROM Win32_ComputerSystem");
+                foreach (ManagementObject mo in s.Get())
+                {
+                    string mfr   = (mo["Manufacturer"]?.ToString() ?? "").Trim();
+                    string model = (mo["Model"]?.ToString() ?? "").Trim();
+                    sysModel = $"{mfr} {model}".Trim();
+                    if (sysModel.Length == 0) sysModel = "—";
+                    break;
+                }
+            }
+            catch { }
+
+            int l2KB = 0, l3KB = 0;
+            string cpuArch = "—";
+            try
+            {
+                using var s = new ManagementObjectSearcher(
+                    "SELECT L2CacheSize, L3CacheSize, Architecture FROM Win32_Processor");
+                foreach (ManagementObject mo in s.Get())
+                {
+                    l2KB = (int)U32(mo["L2CacheSize"]);
+                    l3KB = (int)U32(mo["L3CacheSize"]);
+                    int arch = (int)U32(mo["Architecture"]);
+                    cpuArch = arch switch
+                    {
+                        0  => "x86",
+                        5  => "ARM",
+                        9  => "x64",
+                        12 => "ARM64",
+                        _  => "Unknown"
+                    };
+                    break;
+                }
+            }
+            catch { }
+
+            int modules = 0;
+            try
+            {
+                using var s = new ManagementObjectSearcher("SELECT Capacity FROM Win32_PhysicalMemory");
+                foreach (ManagementObject mo in s.Get()) modules++;
+            }
+            catch { }
+
+            int pfUsed = 0, pfTotal = 0;
+            try
+            {
+                using var s = new ManagementObjectSearcher(
+                    "SELECT CurrentUsage, AllocatedBaseSize FROM Win32_PageFileUsage");
+                foreach (ManagementObject mo in s.Get())
+                {
+                    pfUsed  += (int)U32(mo["CurrentUsage"]);
+                    pfTotal += (int)U32(mo["AllocatedBaseSize"]);
+                }
+            }
+            catch { }
+
+            string gpuDriver = "—", gpuRes = "—";
+            try
+            {
+                using var s = new ManagementObjectSearcher(
+                    "SELECT DriverVersion, CurrentHorizontalResolution, CurrentVerticalResolution, CurrentRefreshRate FROM Win32_VideoController");
+                foreach (ManagementObject mo in s.Get())
+                {
+                    string drv = (mo["DriverVersion"]?.ToString() ?? "").Trim();
+                    uint hres = U32(mo["CurrentHorizontalResolution"]);
+                    uint vres = U32(mo["CurrentVerticalResolution"]);
+                    uint rate = U32(mo["CurrentRefreshRate"]);
+                    if (hres > 0 && vres > 0)
+                    {
+                        if (drv.Length > 0) gpuDriver = drv;
+                        gpuRes = rate > 0 ? $"{hres}×{vres} @ {rate} Hz" : $"{hres}×{vres}";
+                        break;
+                    }
+                }
+            }
+            catch { }
+
+            var driveModels = new Dictionary<string, string>();
+            try
+            {
+                using var ld = new ManagementObjectSearcher(
+                    "SELECT DeviceID FROM Win32_LogicalDisk WHERE DriveType=3");
+                foreach (ManagementObject lo in ld.Get())
+                {
+                    string letter = (lo["DeviceID"]?.ToString() ?? "").TrimEnd(':');
+                    if (letter.Length == 0) continue;
+                    try
+                    {
+                        using var lp = new ManagementObjectSearcher(
+                            $"ASSOCIATORS OF {{Win32_LogicalDisk.DeviceID='{letter}:'}} WHERE AssocClass=Win32_LogicalDiskToPartition");
+                        foreach (ManagementObject pa in lp.Get())
+                        {
+                            string partId = (pa["DeviceID"]?.ToString() ?? "");
+                            using var pd = new ManagementObjectSearcher(
+                                $"ASSOCIATORS OF {{Win32_DiskPartition.DeviceID='{partId}'}} WHERE AssocClass=Win32_DiskDriveToDiskPartition");
+                            foreach (ManagementObject dr in pd.Get())
+                            {
+                                string model = (dr["Model"]?.ToString() ?? "").Trim();
+                                if (model.Length > 0) driveModels[letter] = model;
+                                break;
+                            }
+                            break;
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+
+            return new ExtendedStats(os, machine, ip, adapter, linkSpeed,
+                                     biosInfo, sysModel, boot, user,
+                                     l2KB, l3KB, cpuArch,
+                                     modules, pfUsed, pfTotal,
+                                     gpuDriver, gpuRes, driveModels);
         }
+
+        private static uint U32(object? v) { try { return v == null ? 0u : Convert.ToUInt32(v); } catch { return 0u; } }
     }
 }

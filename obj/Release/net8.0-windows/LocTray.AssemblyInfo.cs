@@ -15,7 +15,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCopyrightAttribute("Copyright © LocTray 2026")]
 [assembly: System.Reflection.AssemblyDescriptionAttribute("LocTray — live PC performance stats shown next to the system clock.")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+6995824b162baea80bdc80afd91b2c8023ac48cb")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+d18c142ca3739fccec9767f728cbef28872a0a71")]
 [assembly: System.Reflection.AssemblyProductAttribute("LocTray")]
 [assembly: System.Reflection.AssemblyTitleAttribute("LocTray")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
